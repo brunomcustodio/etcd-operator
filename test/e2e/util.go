@@ -15,6 +15,8 @@
 package e2e
 
 const (
-	envParallelTest     = "PARALLEL_TEST"
-	envParallelTestTrue = "true"
+	dnsDiscoveryTest            = "DNS_DISCOVERY_TEST"
+	dnsDiscoveryTestTcpHostPort = "DNS_DISCOVERY_TEST_TCP_HOST_PORT"
+	envParallelTest             = "PARALLEL_TEST"
+	envParallelTestTrue         = "true"
 )

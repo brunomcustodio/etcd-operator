@@ -1,5 +1,5 @@
-hash: a7c2eabac68ed67b085e7307e6877aded7f2a10124f291dcd2db4f71b6648ff3
-updated: 2017-09-09T09:46:19.917983559-07:00
+hash: 5310baa564376bf3f984afef7846939bf7c28b586369e13d005a6a35fdbd0a27
+updated: 2017-09-14T10:35:43.710394908+01:00
 imports:
 - name: cloud.google.com/go
   version: 3b1ae45394a234c385be014e9a488f2bb6eef821
@@ -161,6 +161,8 @@ imports:
   version: fc2b8d3a73c4867e51861bbdd5ae3c1f0869dd6a
   subpackages:
   - pbutil
+- name: github.com/miekg/dns
+  version: e4205768578dc90c2669e75a2f8a8bf77e3083a4
 - name: github.com/pborman/uuid
   version: a97ce2ca70fa5a848076093f05e639a89ca34d06
 - name: github.com/pkg/errors

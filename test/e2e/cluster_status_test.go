@@ -25,7 +25,128 @@ import (
 	"github.com/coreos/etcd-operator/pkg/util/retryutil"
 	"github.com/coreos/etcd-operator/test/e2e/e2eutil"
 	"github.com/coreos/etcd-operator/test/e2e/framework"
+	"github.com/miekg/dns"
 )
+
+const (
+	clientPort = 2379
+	serverPort = 2380
+)
+
+type endpoint struct {
+	host string
+	port uint16
+}
+
+// TestDNSDiscovery tests whether DNS Discovery is working as expected.
+//
+// If you want to run this test, you need to establish port-forwarding from your machine to one of the 'kube-dns' pods.
+// Please note that since UDP port-forwarding is not supported (https://github.com/kubernetes/kubernetes/issues/47862)
+// we will be making DNS lookups over TCP.
+//
+// The easiest way to setup this test is to run the following commands in your terminal prior to running the test suite.
+//
+// 1. export KUBE_DNS_POD=$(kubectl get --namespace kube-system pod \
+//                          | grep kube-dns \
+//                          | grep -v autoscaler \
+//                          | head -n 1 \
+//                          | awk '{print $1}')
+// 2. kubectl port-forward ${KUBE_DNS_POD} 10053:53
+// 3. export DNS_DISCOVERY_TEST_TCP_HOST_PORT="127.0.0.1:10053"
+// 4. export DNS_DISCOVERY_TEST="true"
+func TestDNSDiscoveryNoTLS(t *testing.T) {
+	if os.Getenv(dnsDiscoveryTest) != "true" {
+		t.Skip(fmt.Sprintf("skipping test since %s is not set to 'true'", dnsDiscoveryTest))
+	}
+
+	server := os.Getenv(dnsDiscoveryTestTcpHostPort)
+
+	if server == "" {
+		t.Fatalf("%s is not defined", dnsDiscoveryTestTcpHostPort)
+	}
+
+	if os.Getenv(envParallelTest) == envParallelTestTrue {
+		t.Parallel()
+	}
+	f := framework.Global
+	size := 3
+	testEtcd, err := e2eutil.CreateCluster(t, f.CRClient, f.Namespace, e2eutil.NewCluster("test-etcd-", size))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	defer func() {
+		if err := e2eutil.DeleteCluster(t, f.CRClient, f.KubeClient, testEtcd); err != nil {
+			t.Fatal(err)
+		}
+	}()
+
+	if _, err := e2eutil.WaitUntilSizeReached(t, f.CRClient, size, 10, testEtcd); err != nil {
+		t.Fatalf("failed to create %d members etcd cluster: %v", size, err)
+	}
+
+	err = retryutil.Retry(5*time.Second, 3, func() (done bool, err error) {
+		clientDomain := fmt.Sprintf("_etcd-client._tcp.%s.%s.svc.cluster.local.", testEtcd.Name, f.Namespace)
+		serverDomain := fmt.Sprintf("_etcd-server._tcp.%s.%s.svc.cluster.local.", testEtcd.Name, f.Namespace)
+
+		clientEndpoints, err := lookupSRV(server, clientDomain)
+		if err != nil {
+			e2eutil.LogfWithTimestamp(t, "dns lookup failed: %v", err)
+			return false, nil
+		}
+		serverEndpoints, err := lookupSRV(server, serverDomain)
+		if err != nil {
+			e2eutil.LogfWithTimestamp(t, "dns lookup failed: %v", err)
+			return false, nil
+		}
+
+		if len(clientEndpoints) != size {
+			e2eutil.LogfWithTimestamp(t, "expected to discover %d client endpoints, found %d", size, len(clientEndpoints))
+			return false, nil
+		}
+		if len(serverEndpoints) != size {
+			e2eutil.LogfWithTimestamp(t, "expected to discover %d server endpoints, found %d", size, len(serverEndpoints))
+			return false, nil
+		}
+
+		for _, endpoint := range clientEndpoints {
+			ips, err := lookupA(server, endpoint.host)
+			if err != nil {
+				e2eutil.LogfWithTimestamp(t, "dns lookup failed: %v", err)
+				return false, nil
+			}
+			if len(ips) != 1 {
+				e2eutil.LogfWithTimestamp(t, "expected a single A record for %s, found %v", endpoint.host, ips)
+				return false, nil
+			}
+			if endpoint.port != clientPort {
+				e2eutil.LogfWithTimestamp(t, "found client endpoint with wrong port: expected %d, found %d", clientPort, endpoint.port)
+				return false, nil
+			}
+		}
+
+		for _, endpoint := range serverEndpoints {
+			ips, err := lookupA(server, endpoint.host)
+			if err != nil {
+				e2eutil.LogfWithTimestamp(t, "dns lookup failed: %v", err)
+				return false, nil
+			}
+			if len(ips) != 1 {
+				e2eutil.LogfWithTimestamp(t, "expected a single A record for %s, found %v", endpoint.host, ips)
+				return false, nil
+			}
+			if endpoint.port != serverPort {
+				e2eutil.LogfWithTimestamp(t, "found server endpoint with wrong port: expected %d, found %d", serverPort, endpoint.port)
+				return false, nil
+			}
+		}
+
+		return true, nil
+	})
+	if err != nil {
+		t.Fatalf("failed to get size of ReadyMembers to reach %d : %v", size, err)
+	}
+}
 
 func TestReadyMembersStatus(t *testing.T) {
 	if os.Getenv(envParallelTest) == envParallelTestTrue {
@@ -131,4 +252,46 @@ func TestBackupStatus(t *testing.T) {
 	if err != nil {
 		t.Error(err)
 	}
+}
+
+func lookupA(server, domain string) ([]string, error) {
+	c := dns.Client{Net: "tcp"}
+	m := dns.Msg{}
+
+	m.SetQuestion(domain, dns.TypeA)
+
+	r, _, err := c.Exchange(&m, server)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]string, len(r.Answer))
+
+	for idx, ans := range r.Answer {
+		record := ans.(*dns.A)
+		res[idx] = record.A.String()
+	}
+
+	return res, nil
+}
+
+func lookupSRV(server, domain string) ([]endpoint, error) {
+	c := dns.Client{Net: "tcp"}
+	m := dns.Msg{}
+
+	m.SetQuestion(domain, dns.TypeSRV)
+
+	r, _, err := c.Exchange(&m, server)
+	if err != nil {
+		return nil, err
+	}
+
+	res := make([]endpoint, len(r.Answer))
+
+	for idx, ans := range r.Answer {
+		record := ans.(*dns.SRV)
+		res[idx] = endpoint{host: record.Target, port: record.Port}
+	}
+
+	return res, nil
 }
